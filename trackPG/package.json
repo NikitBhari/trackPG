@@ -20,6 +20,7 @@
     "axios": "^1.13.5",
     "expo": "~54.0.33",
     "expo-camera": "~17.0.10",
+    "expo-haptics": "~15.0.8",
     "expo-image-picker": "~17.0.10",
     "expo-media-library": "~18.2.1",
     "expo-status-bar": "~3.0.9",
@@ -29,8 +30,7 @@
     "react-native-progress": "^5.0.1",
     "react-native-reanimated": "~4.1.1",
     "react-native-svg": "15.12.1",
-    "react-native-vector-icons": "^10.3.0",
-    "undefined": "react-native-vector-icons/MaterialIcons"
+    "react-native-vector-icons": "^10.3.0"
   },
   "private": true
 }

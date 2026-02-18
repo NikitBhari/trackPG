@@ -4,55 +4,98 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Animated,
+  ScrollView,
   Dimensions,
-  Easing,
   Alert,
+  FlatList,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import Svg, { Path, G, ClipPath, Rect, Circle } from 'react-native-svg';
 import { Ionicons, FontAwesome, MaterialIcons } from '@expo/vector-icons';
+import Svg, { Defs, LinearGradient, Stop, Rect, ClipPath, Path, Circle } from 'react-native-svg';
+import Animated, {
+  useSharedValue,
+  useAnimatedProps,
+  withTiming,
+  withRepeat,
+  withSequence,
+  Easing,
+  runOnJS,
+  interpolate,
+  Extrapolate,
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
 
-const { width } = Dimensions.get('window');
-const GLASS_HEIGHT = 300;
-const GLASS_WIDTH = width * 0.6;
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// Animated components from react-native-svg
+const AnimatedRect = Animated.createAnimatedComponent(Rect);
+const AnimatedPath = Animated.createAnimatedComponent(Path);
+
+const GLASS_WIDTH = SCREEN_WIDTH * 0.6;
+const GLASS_HEIGHT = GLASS_WIDTH * 1.6; // Taller glass for better visibility
+const WAVE_HEIGHT = 7;
 
 const WaterScreen = () => {
-  const [dailyGoal, setDailyGoal] = useState(2000); // Default goal: 2000ml
+  // State
+  const [dailyGoal, setDailyGoal] = useState(2000);
   const [currentIntake, setCurrentIntake] = useState(0);
   const [waterLog, setWaterLog] = useState([]);
   const [streak, setStreak] = useState(0);
-  
-  const waterLevel = useRef(new Animated.Value(0)).current;
-  const waveAnim = useRef(new Animated.Value(0)).current;
+  const [glassFillPercentage, setGlassFillPercentage] = useState(0);
 
+  // Animation values
+  const waterLevel = useSharedValue(0);
+  const wavePhase = useSharedValue(0);
+  const glowOpacity = useSharedValue(0.3);
+  const isGoalAchieved = useRef(false);
+
+  // Load saved data on mount
   useEffect(() => {
     loadWaterData();
-    startWaveAnimation();
   }, []);
 
+  // Animate water level when intake changes
   useEffect(() => {
-    // Animate water level when intake changes
-    const targetLevel = Math.min(currentIntake / dailyGoal, 1);
-    Animated.timing(waterLevel, {
-      toValue: targetLevel,
+    const percentage = currentIntake / dailyGoal;
+    setGlassFillPercentage(Math.min(percentage, 1));
+    waterLevel.value = withTiming(Math.min(percentage, 1), {
       duration: 800,
       easing: Easing.out(Easing.cubic),
-      useNativeDriver: false,
-    }).start();
+    });
+
+    // Check if goal just achieved
+    if (currentIntake >= dailyGoal && !isGoalAchieved.current) {
+      isGoalAchieved.current = true;
+      triggerGoalAchieved();
+    } else if (currentIntake < dailyGoal) {
+      isGoalAchieved.current = false;
+    }
   }, [currentIntake, dailyGoal]);
 
-  const startWaveAnimation = () => {
-    Animated.loop(
-      Animated.timing(waveAnim, {
-        toValue: 1,
-        duration: 2000,
-        easing: Easing.linear,
-        useNativeDriver: false,
-      })
-    ).start();
+  // Continuous wave animation
+  useEffect(() => {
+    wavePhase.value = withRepeat(
+      withTiming(2 * Math.PI, { duration: 2000, easing: Easing.linear }),
+      -1,
+      false
+    );
+  }, []);
+
+  // Trigger goal achieved effects
+  const triggerGoalAchieved = () => {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    // Pulse glow
+    glowOpacity.value = withSequence(
+      withTiming(0.8, { duration: 300 }),
+      withRepeat(
+        withTiming(0.4, { duration: 1000, easing: Easing.inOut(Easing.sin) }),
+        -1,
+        true
+      )
+    );
   };
 
+  // Load data from AsyncStorage
   const loadWaterData = async () => {
     try {
       const today = new Date().toDateString();
@@ -60,532 +103,624 @@ const WaterScreen = () => {
       const savedStreak = await AsyncStorage.getItem('waterStreak');
       const savedGoal = await AsyncStorage.getItem('waterGoal');
 
-      if (savedGoal) {
-        setDailyGoal(parseInt(savedGoal));
-      }
-
-      if (savedStreak) {
-        setStreak(parseInt(savedStreak));
-      }
+      if (savedGoal) setDailyGoal(parseInt(savedGoal));
+      if (savedStreak) setStreak(parseInt(savedStreak));
 
       if (savedData) {
-        const parsedData = JSON.parse(savedData);
-        setCurrentIntake(parsedData.currentIntake);
-        setWaterLog(parsedData.log);
+        const parsed = JSON.parse(savedData);
+        setCurrentIntake(parsed.currentIntake || 0);
+        setWaterLog(parsed.log || []);
       }
     } catch (error) {
       console.error('Error loading water data:', error);
     }
   };
 
+  // Save data to AsyncStorage
   const saveWaterData = async () => {
     try {
       const today = new Date().toDateString();
-      const data = {
-        currentIntake,
-        log: waterLog,
-        date: today,
-      };
+      const data = { currentIntake, log: waterLog, date: today };
       await AsyncStorage.setItem(`waterData_${today}`, JSON.stringify(data));
     } catch (error) {
       console.error('Error saving water data:', error);
     }
   };
 
+  // Add water intake
   const addWater = (amount) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     const newIntake = currentIntake + amount;
-    const newLog = [...waterLog, {
-      amount,
-      time: new Date().toISOString(),
-    }];
-
+    const newLog = [
+      ...waterLog,
+      { id: Date.now().toString(), amount, time: new Date().toISOString() },
+    ];
     setCurrentIntake(newIntake);
     setWaterLog(newLog);
-    
-    // Check and update streak
-    if (newIntake >= dailyGoal) {
-      updateStreak();
-    }
-
     saveWaterData();
+
+    // Check streak after delay (allow state to update)
+    setTimeout(() => {
+      if (newIntake >= dailyGoal) {
+        updateStreak();
+      }
+    }, 100);
   };
 
+  // Update streak when goal is achieved for the first time today
   const updateStreak = async () => {
     const today = new Date().toDateString();
     const lastAchieved = await AsyncStorage.getItem('lastWaterGoalAchieved');
-    
     if (lastAchieved !== today) {
       const newStreak = streak + 1;
       setStreak(newStreak);
       await AsyncStorage.setItem('waterStreak', newStreak.toString());
       await AsyncStorage.setItem('lastWaterGoalAchieved', today);
-      
-      if (newStreak > 1) {
-        Alert.alert('🎉 Streak Updated!', `You're on a ${newStreak}-day streak!`);
-      }
     }
   };
 
-  const updateGoal = (newGoal) => {
-    setDailyGoal(newGoal);
-    AsyncStorage.setItem('waterGoal', newGoal.toString());
+  // Set new daily goal
+  const setGoal = (goal) => {
+    setDailyGoal(goal);
+    AsyncStorage.setItem('waterGoal', goal.toString());
   };
 
+  // Reset today's intake
   const resetToday = () => {
-    Alert.alert(
-      'Reset Water Intake',
-      'Are you sure you want to reset today\'s water intake?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset',
-          style: 'destructive',
-          onPress: () => {
-            setCurrentIntake(0);
-            setWaterLog([]);
-            saveWaterData();
-          },
+    Alert.alert('Reset Water Intake', 'Are you sure?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Reset',
+        style: 'destructive',
+        onPress: () => {
+          setCurrentIntake(0);
+          setWaterLog([]);
+          saveWaterData();
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         },
-      ]
+      },
+    ]);
+  };
+
+  // Delete a log entry
+  const deleteLogEntry = (id, amount) => {
+    const updatedLog = waterLog.filter((item) => item.id !== id);
+    setWaterLog(updatedLog);
+    setCurrentIntake((prev) => Math.max(0, prev - amount));
+    saveWaterData();
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+  };
+
+  // Calculate average per drink
+  const averagePerDrink =
+    waterLog.length > 0 ? Math.round(currentIntake / waterLog.length) : 0;
+
+  // Get color based on fill percentage
+  const getWaterColor = (percentage) => {
+    if (percentage >= 1) return '#4CAF50'; // Green
+    if (percentage >= 0.75) return '#00BCD4'; // Cyan
+    if (percentage >= 0.5) return '#2196F3'; // Blue
+    if (percentage >= 0.25) return '#03A9F4'; // Light Blue
+    return '#29B6F6'; // Default
+  };
+
+  // ---- Animated Props for SVG ----
+  const animatedRectProps = useAnimatedProps(() => {
+    const fillHeight = interpolate(
+      waterLevel.value,
+      [0, 1],
+      [0, GLASS_HEIGHT - 40],
+      Extrapolate.CLAMP
     );
-  };
+    return {
+      y: GLASS_HEIGHT - 20 - fillHeight, // y starts from top, so move up as fill increases
+      height: fillHeight,
+    };
+  });
 
-  const getWaterColor = () => {
-    const percentage = (currentIntake / dailyGoal) * 100;
-    if (percentage >= 100) return '#4CAF50'; // Green
-    if (percentage >= 75) return '#2196F3'; // Blue
-    if (percentage >= 50) return '#03A9F4'; // Light Blue
-    if (percentage >= 25) return '#00BCD4'; // Cyan
-    return '#B3E5FC'; // Very light blue
-  };
+  // Generate wave path based on water level and phase
+  const animatedWavePath = useAnimatedProps(() => {
+    const fillHeight = interpolate(
+      waterLevel.value,
+      [0, 1],
+      [0, GLASS_HEIGHT - 40],
+      Extrapolate.CLAMP
+    );
+    const yBase = GLASS_HEIGHT - 20 - fillHeight;
+    const phase = wavePhase.value;
 
-  const renderWaterGlass = () => {
-    const waterColor = getWaterColor();
-    const waterHeight = waterLevel.interpolate({
-      inputRange: [0, 1],
-      outputRange: [0, GLASS_HEIGHT - 40],
-    });
+    // Generate a smooth sine wave across the width of the glass
+    let path = '';
+    for (let x = 0; x <= GLASS_WIDTH; x += 5) {
+      const waveY = Math.sin(x * 0.05 + phase) * WAVE_HEIGHT;
+      if (x === 0) {
+        path += `M ${x} ${yBase + waveY}`;
+      } else {
+        path += ` L ${x} ${yBase + waveY}`;
+      }
+    }
+    // Close the path to fill
+    path += ` L ${GLASS_WIDTH} ${GLASS_HEIGHT - 20} L 0 ${GLASS_HEIGHT - 20} Z`;
+    return { d: path };
+  });
 
-    const waveTranslate = waveAnim.interpolate({
-      inputRange: [0, 1],
-      outputRange: [0, -20],
-    });
+  // Glow opacity for goal achieved
+  const animatedGlowProps = useAnimatedProps(() => {
+    return {
+      opacity: glowOpacity.value,
+    };
+  });
 
-    return (
-      <View style={styles.glassContainer}>
-        {/* Glass */}
-        <Svg height={GLASS_HEIGHT} width={GLASS_WIDTH}>
-          {/* Glass outline */}
-          <Path
-            d={`M 10 10 L ${GLASS_WIDTH - 10} 10 L ${GLASS_WIDTH - 20} ${GLASS_HEIGHT - 10} L 20 ${GLASS_HEIGHT - 10} Z`}
-            fill="none"
-            stroke="#B0BEC5"
-            strokeWidth="2"
-          />
-          
-          {/* Water with wave animation */}
-          <ClipPath id="clip">
-            <Path
-              d={`M 10 10 L ${GLASS_WIDTH - 10} 10 L ${GLASS_WIDTH - 20} ${GLASS_HEIGHT - 10} L 20 ${GLASS_HEIGHT - 10} Z`}
-            />
-          </ClipPath>
-          
-          <G clipPath="url(#clip)">
-            <Animated.View
-              style={{
-                transform: [{ translateY: waterHeight }],
-              }}
-            >
-              <Rect
-                x="0"
-                y="0"
-                width={GLASS_WIDTH}
-                height={GLASS_HEIGHT}
-                fill={waterColor}
-                opacity={0.6}
-              />
-              
-              {/* Wave pattern */}
-              <Animated.View
-                style={{
-                  transform: [{ translateY: waveTranslate }],
-                }}
-              >
-                <Path
-                  d={`M 0 20 Q ${GLASS_WIDTH * 0.25} 0 ${GLASS_WIDTH * 0.5} 20 T ${GLASS_WIDTH} 20 V 40 H 0 Z`}
-                  fill={waterColor}
-                  opacity={0.8}
-                />
-                <Path
-                  d={`M 0 40 Q ${GLASS_WIDTH * 0.25} 60 ${GLASS_WIDTH * 0.5} 40 T ${GLASS_WIDTH} 40 V 60 H 0 Z`}
-                  fill={waterColor}
-                  opacity={0.6}
-                />
-              </Animated.View>
-            </Animated.View>
-          </G>
-          
-          {/* Measurement lines */}
-          {[0.25, 0.5, 0.75, 1].map((level) => (
-            <Path
-              key={level}
-              d={`M 30 ${GLASS_HEIGHT - 40 - (GLASS_HEIGHT - 80) * level} L ${GLASS_WIDTH - 30} ${GLASS_HEIGHT - 40 - (GLASS_HEIGHT - 80) * level}`}
-              stroke="#90A4AE"
-              strokeWidth="1"
-              strokeDasharray="5,5"
-            />
-          ))}
-        </Svg>
-
-        {/* Water level indicator */}
-        <View style={styles.waterLevelIndicator}>
-          <Text style={styles.waterLevelText}>
-            {currentIntake}ml / {dailyGoal}ml
-          </Text>
-          <Text style={styles.waterPercentage}>
-            {Math.round((currentIntake / dailyGoal) * 100)}%
+  // Render a single water log item
+  const renderLogItem = ({ item }) => (
+    <View style={styles.logItem}>
+      <View style={styles.logItemLeft}>
+        <View style={styles.logIonicons}>
+          <Ionicons name="water" size={16} color="#4A90E2" />
+        </View>
+        <View>
+          <Text style={styles.logAmount}>{item.amount} ml</Text>
+          <Text style={styles.logTime}>
+            {new Date(item.time).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            })}
           </Text>
         </View>
       </View>
-    );
-  };
+      <TouchableOpacity
+        onPress={() => deleteLogEntry(item.id, item.amount)}
+        style={styles.deleteButton}
+      >
+        <Ionicons name="close-circle" size={20} color="#FF5252" />
+      </TouchableOpacity>
+    </View>
+  );
 
   return (
-    <View style={styles.container}>
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.contentContainer}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Header */}
       <View style={styles.header}>
         <View>
-          <Text style={styles.title}>Water Tracker</Text>
-          <View style={styles.streakContainer}>
-            <Ionicons name="flame" size={16} color="#FF9800" />
-            <Text style={styles.streakText}>{streak} day streak</Text>
-          </View>
+          <Text style={styles.title}>Hydration</Text>
+          <Text style={styles.subtitle}>Track your daily water</Text>
         </View>
-        <TouchableOpacity style={styles.settingsButton} onPress={() => {}}>
-          <Ionicons name="settings-outline" size={24} color="#4A90E2" />
-        </TouchableOpacity>
+        <View style={styles.streakBadge}>
+          <Ionicons name="flame" size={20} color="#FF9800" />
+          <Text style={styles.streakText}>{streak} day streak</Text>
+        </View>
       </View>
 
-      {/* Main Water Glass */}
-      <View style={styles.mainContent}>
-        {renderWaterGlass()}
-        
-        {/* Goal Progress */}
-        <View style={styles.goalContainer}>
-          <View style={styles.goalProgress}>
-            <View 
-              style={[
-                styles.goalFill, 
-                { 
-                  width: `${Math.min((currentIntake / dailyGoal) * 100, 100)}%`,
-                  backgroundColor: currentIntake >= dailyGoal ? '#4CAF50' : '#4A90E2',
-                }
-              ]} 
+      {/* Futuristic Glass Card */}
+      <View style={styles.glassCard}>
+        {/* Outer glow when goal achieved */}
+        <Animated.View style={[styles.glowOverlay, animatedGlowProps]} />
+
+        <View style={styles.glassContainer}>
+          {/* SVG Glass with animated water */}
+          <Svg width={GLASS_WIDTH} height={GLASS_HEIGHT} viewBox={`0 0 ${GLASS_WIDTH} ${GLASS_HEIGHT}`}>
+            <Defs>
+              <LinearGradient id="glassGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                <Stop offset="0%" stopColor="rgba(255,255,255,0.4)" />
+                <Stop offset="100%" stopColor="rgba(255,255,255,0.1)" />
+              </LinearGradient>
+              <LinearGradient id="waterGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                <Stop offset="0%" stopColor={getWaterColor(glassFillPercentage)} stopOpacity="0.9" />
+                <Stop offset="100%" stopColor={getWaterColor(glassFillPercentage)} stopOpacity="0.7" />
+              </LinearGradient>
+              <ClipPath id="glassClip">
+                <Path
+                  d={`M 20 20 L ${GLASS_WIDTH - 20} 20 L ${GLASS_WIDTH - 30} ${GLASS_HEIGHT - 20} L 30 ${GLASS_HEIGHT - 20} Z`}
+                />
+              </ClipPath>
+            </Defs>
+
+            {/* Glass outline */}
+            <Path
+              d={`M 20 20 L ${GLASS_WIDTH - 20} 20 L ${GLASS_WIDTH - 30} ${GLASS_HEIGHT - 20} L 30 ${GLASS_HEIGHT - 20} Z`}
+              fill="url(#glassGradient)"
+              stroke="rgba(255,255,255,0.8)"
+              strokeWidth="2"
             />
+
+            {/* Clipped water area */}
+            <ClipPath id="waterClip">
+              <Path
+                d={`M 20 20 L ${GLASS_WIDTH - 20} 20 L ${GLASS_WIDTH - 30} ${GLASS_HEIGHT - 20} L 30 ${GLASS_HEIGHT - 20} Z`}
+              />
+            </ClipPath>
+
+            {/* Water background fill (static) */}
+            <AnimatedRect
+              x="0"
+              y={GLASS_HEIGHT - 20}
+              width={GLASS_WIDTH}
+              height={0}
+              fill="url(#waterGradient)"
+              clipPath="url(#waterClip)"
+              animatedProps={animatedRectProps}
+            />
+
+            {/* Animated wave on top */}
+            <AnimatedPath
+              animatedProps={animatedWavePath}
+              fill="url(#waterGradient)"
+              clipPath="url(#waterClip)"
+              opacity={0.9}
+            />
+
+            {/* Inner glass highlights */}
+            <Path
+              d={`M 30 30 L ${GLASS_WIDTH - 30} 30 L ${GLASS_WIDTH - 40} ${GLASS_HEIGHT - 30} L 40 ${GLASS_HEIGHT - 30} Z`}
+              fill="none"
+              stroke="rgba(255,255,255,0.3)"
+              strokeWidth="1"
+              strokeDasharray="4 4"
+            />
+          </Svg>
+
+          {/* Water percentage text */}
+          <View style={styles.percentageBadge}>
+            <Text style={styles.percentageText}>
+              {Math.round(glassFillPercentage * 100)}%
+            </Text>
           </View>
-          <Text style={styles.goalText}>
-            {currentIntake >= dailyGoal ? '🎉 Goal Achieved!' : `${dailyGoal - currentIntake}ml to go`}
-          </Text>
         </View>
 
-        {/* Quick Add Buttons */}
-        <Text style={styles.quickAddTitle}>Quick Add</Text>
-        <View style={styles.quickAddContainer}>
+        {/* Intake stats below glass */}
+        <View style={styles.intakeStats}>
+          <Text style={styles.intakeValue}>{currentIntake} ml</Text>
+          <Text style={styles.intakeGoal}>of {dailyGoal} ml</Text>
+        </View>
+
+        {/* Goal progress bar */}
+        <View style={styles.progressBarContainer}>
+          <View
+            style={[
+              styles.progressFill,
+              { width: `${Math.min(glassFillPercentage * 100, 100)}%` },
+            ]}
+          />
+        </View>
+      </View>
+
+      {/* Quick Add Buttons - Futuristic */}
+      <View style={styles.quickAddSection}>
+        <Text style={styles.sectionTitle}>QUICK ADD</Text>
+        <View style={styles.quickAddGrid}>
           {[100, 250, 500, 1000].map((amount) => (
             <TouchableOpacity
               key={amount}
               style={styles.quickAddButton}
               onPress={() => addWater(amount)}
+              activeOpacity={0.7}
             >
-              <Ionicons name="add-circle-outline" size={24} color="#4A90E2" />
-              <Text style={styles.quickAddText}>{amount}ml</Text>
+              <Ionicons name="add-circle" size={24} color="#4A90E2" />
+              <Text style={styles.quickAddText}>{amount} ml</Text>
             </TouchableOpacity>
           ))}
         </View>
+      </View>
 
-        {/* Custom Add */}
-        <View style={styles.customAddContainer}>
-          <Text style={styles.customAddTitle}>Custom Amount</Text>
-          <View style={styles.customAddRow}>
-            {[50, 150, 200].map((amount) => (
-              <TouchableOpacity
-                key={amount}
-                style={styles.customAddButton}
-                onPress={() => addWater(amount)}
-              >
-                <Text style={styles.customAddText}>+{amount}ml</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
-
-        {/* Goal Settings */}
-        <View style={styles.goalSettings}>
-          <Text style={styles.goalSettingsTitle}>Daily Goal</Text>
-          <View style={styles.goalButtons}>
-            {[1500, 2000, 2500, 3000].map((goal) => (
-              <TouchableOpacity
-                key={goal}
-                style={[
-                  styles.goalButton,
-                  dailyGoal === goal && styles.goalButtonActive,
-                ]}
-                onPress={() => updateGoal(goal)}
-              >
-                <Text
-                  style={[
-                    styles.goalButtonText,
-                    dailyGoal === goal && styles.goalButtonTextActive,
-                  ]}
-                >
-                  {goal}ml
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </View>
+      {/* Custom Amount Buttons */}
+      <View style={styles.customAddSection}>
+        <Text style={styles.sectionTitle}>CUSTOM</Text>
+        <View style={styles.customAddRow}>
+          {[50, 150, 200, 300].map((amount) => (
+            <TouchableOpacity
+              key={amount}
+              style={styles.customAddButton}
+              onPress={() => addWater(amount)}
+            >
+              <Text style={styles.customAddText}>+{amount} ml</Text>
+            </TouchableOpacity>
+          ))}
         </View>
       </View>
 
-      {/* Water Log */}
-      <View style={styles.logContainer}>
-        <View style={styles.logHeader}>
-          <Text style={styles.logTitle}>Today's Intake</Text>
+      {/* Goal Settings */}
+      <View style={styles.goalSection}>
+        <View style={styles.goalHeader}>
+          <Text style={styles.sectionTitle}>DAILY GOAL</Text>
           <TouchableOpacity onPress={resetToday}>
-            <Text style={styles.resetText}>Reset</Text>
+            <Text style={styles.resetText}>Reset Today</Text>
           </TouchableOpacity>
         </View>
-        
+        <View style={styles.goalButtons}>
+          {[1500, 2000, 2500, 3000].map((goal) => (
+            <TouchableOpacity
+              key={goal}
+              style={[
+                styles.goalButton,
+                dailyGoal === goal && styles.goalButtonActive,
+              ]}
+              onPress={() => setGoal(goal)}
+            >
+              <Text
+                style={[
+                  styles.goalButtonText,
+                  dailyGoal === goal && styles.goalButtonTextActive,
+                ]}
+              >
+                {goal} ml
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </View>
+
+      {/* Water Log Section with Scroll */}
+      <View style={styles.logSection}>
+        <View style={styles.logHeader}>
+          <Text style={styles.sectionTitle}>TODAY'S LOG</Text>
+          <Text style={styles.logCount}>{waterLog.length} drinks</Text>
+        </View>
+
         {waterLog.length === 0 ? (
           <View style={styles.emptyLog}>
             <Ionicons name="water-outline" size={48} color="#ccc" />
-            <Text style={styles.emptyLogText}>No water logged today</Text>
+            <Text style={styles.emptyLogText}>No water logged yet</Text>
+            <Text style={styles.emptyLogSubtext}>Tap a button above to add</Text>
           </View>
         ) : (
-          <View style={styles.logList}>
-            {waterLog.map((log, index) => (
-              <View key={index} style={styles.logItem}>
-                <View style={styles.logItemLeft}>
-                  <Ionicons name="water" size={20} color="#4A90E2" />
-                  <Text style={styles.logAmount}>{log.amount}ml</Text>
-                </View>
-                <Text style={styles.logTime}>
-                  {new Date(log.time).toLocaleTimeString([], { 
-                    hour: '2-digit', 
-                    minute: '2-digit' 
-                  })}
-                </Text>
+          <>
+            <FlatList
+              data={waterLog}
+              renderItem={renderLogItem}
+              keyExtractor={(item) => item.id}
+              scrollEnabled={true}
+              showsVerticalScrollIndicator={false}
+              style={styles.logList}
+              contentContainerStyle={styles.logListContent}
+            />
+            {/* Statistics */}
+            <View style={styles.statsRow}>
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{waterLog.length}</Text>
+                <Text style={styles.statLabel}>Drinks</Text>
               </View>
-            ))}
-          </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>{averagePerDrink} ml</Text>
+                <Text style={styles.statLabel}>Avg per drink</Text>
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>
+                  {Math.round(glassFillPercentage * 100)}%
+                </Text>
+                <Text style={styles.statLabel}>Goal</Text>
+              </View>
+            </View>
+          </>
         )}
-        
-        {/* Statistics */}
-        <View style={styles.statsContainer}>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>{waterLog.length}</Text>
-            <Text style={styles.statLabel}>Drinks Today</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={styles.statValue}>
-              {waterLog.length > 0 
-                ? Math.round(currentIntake / waterLog.length)
-                : 0}ml
-            </Text>
-            <Text style={styles.statLabel}>Average per Drink</Text>
-          </View>
-          <View style={styles.statItem}>
-            <Text style={[styles.statValue, 
-              { color: currentIntake >= dailyGoal ? '#4CAF50' : '#FF9800' }
-            ]}>
-              {Math.round((currentIntake / dailyGoal) * 100)}%
-            </Text>
-            <Text style={styles.statLabel}>Goal Progress</Text>
-          </View>
-        </View>
       </View>
-    </View>
+
+      {/* Extra bottom padding */}
+      <View style={{ height: 20 }} />
+    </ScrollView>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#0A0F1E', // Deep dark futuristic background
+  },
+  contentContainer: {
+    paddingBottom: 30,
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 20,
-    backgroundColor: '#fff',
+    paddingHorizontal: 20,
+    paddingTop: 20,
+    paddingBottom: 10,
   },
   title: {
-    fontSize: 24,
-    fontWeight: 'bold',
-    color: '#333',
+    fontSize: 28,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 1,
   },
-  streakContainer: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  subtitle: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.6)',
     marginTop: 4,
   },
+  streakBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,152,0,0.15)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255,152,0,0.5)',
+  },
   streakText: {
-    marginLeft: 4,
+    marginLeft: 6,
     color: '#FF9800',
     fontWeight: '600',
   },
-  settingsButton: {
-    padding: 8,
-  },
-  mainContent: {
-    flex: 1,
-    alignItems: 'center',
+  glassCard: {
+    marginHorizontal: 20,
+    marginVertical: 10,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderRadius: 30,
     padding: 20,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    position: 'relative',
+    overflow: 'hidden',
+  },
+  glowOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(76,175,80,0.2)',
+    borderRadius: 30,
+    shadowColor: '#4CAF50',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.8,
+    shadowRadius: 20,
   },
   glassContainer: {
     alignItems: 'center',
-    marginVertical: 20,
+    justifyContent: 'center',
+    marginVertical: 10,
   },
-  waterLevelIndicator: {
+  percentageBadge: {
     position: 'absolute',
-    bottom: -40,
+    top: '40%',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+  },
+  percentageText: {
+    fontSize: 24,
+    fontWeight: 'bold',
+    color: '#FFFFFF',
+  },
+  intakeStats: {
     alignItems: 'center',
+    marginTop: 10,
   },
-  waterLevelText: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
+  intakeValue: {
+    fontSize: 36,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
-  waterPercentage: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    color: '#4A90E2',
+  intakeGoal: {
+    fontSize: 16,
+    color: 'rgba(255,255,255,0.7)',
     marginTop: 4,
   },
-  goalContainer: {
-    width: '80%',
-    marginVertical: 20,
-  },
-  goalProgress: {
-    height: 12,
-    backgroundColor: '#e0e0e0',
-    borderRadius: 6,
+  progressBarContainer: {
+    width: '100%',
+    height: 8,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 4,
+    marginTop: 20,
     overflow: 'hidden',
   },
-  goalFill: {
+  progressFill: {
     height: '100%',
-    borderRadius: 6,
+    backgroundColor: '#4A90E2',
+    borderRadius: 4,
   },
-  goalText: {
-    textAlign: 'center',
-    marginTop: 8,
-    fontSize: 16,
+  quickAddSection: {
+    marginHorizontal: 20,
+    marginTop: 20,
+  },
+  sectionTitle: {
+    fontSize: 14,
     fontWeight: '600',
-    color: '#333',
+    color: 'rgba(255,255,255,0.5)',
+    letterSpacing: 2,
+    marginBottom: 12,
   },
-  quickAddTitle: {
-    fontSize: 18,
-    fontWeight: 'bold',
-    color: '#333',
-    marginBottom: 16,
-    alignSelf: 'flex-start',
-    marginLeft: 20,
-  },
-  quickAddContainer: {
+  quickAddGrid: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    width: '100%',
-    paddingHorizontal: 20,
-    marginBottom: 24,
   },
   quickAddButton: {
     alignItems: 'center',
-    backgroundColor: '#fff',
-    padding: 16,
-    borderRadius: 12,
-    elevation: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    width: '22%',
+    backgroundColor: 'rgba(74,144,226,0.1)',
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: 'rgba(74,144,226,0.3)',
+    width: '23%',
   },
   quickAddText: {
     marginTop: 8,
     color: '#4A90E2',
     fontWeight: '600',
+    fontSize: 14,
   },
-  customAddContainer: {
-    width: '100%',
-    paddingHorizontal: 20,
-    marginBottom: 24,
-  },
-  customAddTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-    marginBottom: 12,
+  customAddSection: {
+    marginHorizontal: 20,
+    marginTop: 20,
   },
   customAddRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
   customAddButton: {
-    backgroundColor: '#e3f2fd',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 20,
-    flex: 1,
-    marginHorizontal: 4,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderRadius: 30,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    width: '23%',
     alignItems: 'center',
   },
   customAddText: {
-    color: '#1976d2',
+    color: '#FFFFFF',
     fontWeight: '600',
   },
-  goalSettings: {
-    width: '100%',
-    paddingHorizontal: 20,
-    marginBottom: 20,
+  goalSection: {
+    marginHorizontal: 20,
+    marginTop: 20,
   },
-  goalSettingsTitle: {
-    fontSize: 16,
+  goalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  resetText: {
+    color: '#FF5252',
     fontWeight: '600',
-    color: '#333',
-    marginBottom: 12,
+    fontSize: 14,
   },
   goalButtons: {
     flexDirection: 'row',
     justifyContent: 'space-between',
   },
   goalButton: {
-    backgroundColor: '#f5f5f5',
+    backgroundColor: 'rgba(255,255,255,0.05)',
     paddingVertical: 12,
-    paddingHorizontal: 16,
+    paddingHorizontal: 8,
     borderRadius: 20,
-    flex: 1,
-    marginHorizontal: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    width: '23%',
     alignItems: 'center',
   },
   goalButtonActive: {
     backgroundColor: '#4A90E2',
+    borderColor: '#4A90E2',
   },
   goalButtonText: {
-    color: '#666',
+    color: 'rgba(255,255,255,0.7)',
     fontWeight: '600',
+    fontSize: 14,
   },
   goalButtonTextActive: {
-    color: '#fff',
+    color: '#FFFFFF',
   },
-  logContainer: {
-    backgroundColor: '#fff',
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
+  logSection: {
+    marginHorizontal: 20,
+    marginTop: 30,
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderRadius: 20,
     padding: 20,
-    elevation: 8,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -4 },
-    shadowOpacity: 0.1,
-    shadowRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
   },
   logHeader: {
     flexDirection: 'row',
@@ -593,26 +728,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 16,
   },
-  logTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#333',
-  },
-  resetText: {
-    color: '#FF5252',
-    fontWeight: '600',
+  logCount: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 14,
   },
   emptyLog: {
     alignItems: 'center',
-    padding: 40,
+    paddingVertical: 40,
   },
   emptyLogText: {
     marginTop: 12,
     fontSize: 16,
-    color: '#999',
+    color: 'rgba(255,255,255,0.7)',
+  },
+  emptyLogSubtext: {
+    marginTop: 4,
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.4)',
   },
   logList: {
-    maxHeight: 150,
+    maxHeight: 200,
+  },
+  logListContent: {
+    paddingBottom: 8,
   },
   logItem: {
     flexDirection: 'row',
@@ -620,42 +758,60 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 12,
     borderBottomWidth: 1,
-    borderBottomColor: '#f0f0f0',
+    borderBottomColor: 'rgba(255,255,255,0.05)',
   },
   logItemLeft: {
     flexDirection: 'row',
     alignItems: 'center',
   },
+  logIonicons: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: 'rgba(74,144,226,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: 12,
+  },
   logAmount: {
-    marginLeft: 12,
     fontSize: 16,
-    color: '#333',
     fontWeight: '600',
+    color: '#FFFFFF',
   },
   logTime: {
-    color: '#666',
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.5)',
+    marginTop: 2,
   },
-  statsContainer: {
+  deleteButton: {
+    padding: 8,
+  },
+  statsRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 24,
-    paddingTop: 24,
+    justifyContent: 'space-around',
+    marginTop: 20,
+    paddingTop: 20,
     borderTopWidth: 1,
-    borderTopColor: '#f0f0f0',
+    borderTopColor: 'rgba(255,255,255,0.05)',
   },
   statItem: {
     alignItems: 'center',
     flex: 1,
   },
   statValue: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: 'bold',
-    color: '#4A90E2',
+    color: '#FFFFFF',
   },
   statLabel: {
-    marginTop: 4,
     fontSize: 12,
-    color: '#666',
+    color: 'rgba(255,255,255,0.5)',
+    marginTop: 4,
+  },
+  statDivider: {
+    width: 1,
+    height: '80%',
+    backgroundColor: 'rgba(255,255,255,0.1)',
   },
 });
 
